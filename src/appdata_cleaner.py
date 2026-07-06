@@ -41,12 +41,14 @@ PROTECTED_COMPONENTS = {
     "bookmarks",
     "preferences",
     "history",
+    "visited links",
     "favicons",
     "top sites",
     "web data",
     "sync data",
     "file system",
     "service worker",
+    "platform notifications",
 }
 
 PROTECTED_PATH_KEYWORDS = {
@@ -57,6 +59,7 @@ PROTECTED_PATH_KEYWORDS = {
     "session storage",
     "webstorage",
     "service worker",
+    "visited links",
 }
 
 BROWSER_CACHE_NAMES = {
@@ -84,6 +87,9 @@ BROWSER_CACHE_NAMES = {
     "blob_storage",
     "webstore downloads",
     "no_vary_search",
+    "graphitedawncache",
+    "image_cache",
+    "remote_resource_cache",
 }
 
 ROAMING_CACHE_NAMES = BROWSER_CACHE_NAMES | {
@@ -107,6 +113,11 @@ ROAMING_CACHE_NAME_PARTS = {
     "tmp",
     "temp",
     "update",
+}
+
+ROAMING_CACHE_CONTAINER_NAMES = {
+    "web-cache-temp",
+    "webkitcache",
 }
 
 EMPTY_DIR_SKIP_TOP = {
@@ -134,6 +145,8 @@ CODEX_PROCESS_NAMES = {
     "appdatacleaner_v4.exe",
     "appdatacleaner_v5.exe",
     "appdatacleaner_v6.exe",
+    "appdatacleaner_v7.exe",
+    "appdatacleaner_v8.exe",
 }
 
 PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -155,6 +168,10 @@ PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\qianniucef\\", ("AliWorkbench.exe",)),
     ("\\adspower_global\\", ("AdsPower Global.exe", "adspower_global.exe")),
     ("\\spchrome\\", ("SPChrome.exe", "chrome.exe")),
+    ("\\roaming\\qq\\", ("QQ.exe",)),
+    ("\\qqmusiccache\\", ("QQMusic.exe",)),
+    ("\\cherrystudio\\", ("Cherry Studio.exe", "CherryStudio.exe")),
+    ("\\onedrive\\", ("OneDrive.exe",)),
 )
 
 
@@ -275,6 +292,8 @@ def directory_size(path: Path | str) -> tuple[int, int]:
                 st = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
+            if contains_protected_component(entry.path):
+                continue
             try:
                 if entry.is_dir(follow_symlinks=False):
                     if is_reparse_stat(st):
@@ -306,6 +325,8 @@ def make_writable(path: Path | str) -> None:
 def remove_any(path: Path | str, errors: list[str]) -> None:
     p = Path(path)
     if not p.exists() and not p.is_symlink():
+        return
+    if contains_protected_component(p):
         return
     if is_reparse_path(p):
         errors.append(f"跳过符号链接/联接点: {p}")
@@ -485,6 +506,65 @@ def collect_named_cache_dirs(
         )
 
 
+def collect_matching_files(
+    collector: TargetCollector,
+    root: Path,
+    patterns: Iterable[str],
+    category: str,
+    label: str,
+    *,
+    recommended: bool = True,
+    requires_admin: bool = False,
+    source: str = "",
+    before_processes: tuple[str, ...] = (),
+) -> None:
+    if not root.exists() or not root.is_dir() or is_reparse_path(root):
+        return
+    for pattern in patterns:
+        try:
+            matches = root.glob(pattern)
+            for item in matches:
+                if not item.is_file() or is_reparse_path(item):
+                    continue
+                collector.add(
+                    item,
+                    category,
+                    f"{label} - {item.name}",
+                    mode="file",
+                    recommended=recommended,
+                    requires_admin=requires_admin,
+                    source=source,
+                    before_processes=before_processes,
+                )
+        except OSError:
+            continue
+
+
+def collect_qqmusic_cache_targets(collector: TargetCollector) -> None:
+    safe_children = (
+        "Temp",
+        "Cache",
+        "cache",
+        "downloadproxy",
+        "downloadproxyNew",
+    )
+    for drive in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = Path(f"{drive}:\\QQMusicCache")
+        if not root.exists() or not root.is_dir() or is_reparse_path(root):
+            continue
+        for child in safe_children:
+            path = root / child
+            collector.add(
+                path,
+                "应用缓存/更新包",
+                f"QQ 音乐缓存 {path}",
+                mode="tree",
+                recommended=True,
+                source="WDC 报告规则",
+                before_processes=("QQMusic.exe",),
+            )
+
+
 def is_roaming_safe_cache_dir(path: Path) -> bool:
     name = path.name.lower()
     if name in ROAMING_CACHE_NAMES:
@@ -496,6 +576,9 @@ def collect_roaming_safe_caches(collector: TargetCollector, root: Path) -> None:
     if not root.exists():
         return
     for cache_dir in walk_dirs_limited(root, max_depth=8):
+        if cache_dir.name.lower() in ROAMING_CACHE_CONTAINER_NAMES:
+            collect_browser_caches(collector, cache_dir, f"{cache_dir.parent.name} - {cache_dir.name}")
+            continue
         if not is_roaming_safe_cache_dir(cache_dir):
             continue
         if contains_protected_component(cache_dir):
@@ -508,6 +591,119 @@ def collect_roaming_safe_caches(collector: TargetCollector, root: Path) -> None:
             recommended=True,
             description="Roaming 下自动发现的缓存、日志、崩溃记录、更新残留或临时目录；已排除登录/cookies/本地站点数据相关路径。",
             source="Roaming 扫描",
+        )
+
+
+def collect_wdc_user_targets(c: TargetCollector, user_profile: Path) -> None:
+    user_label = user_profile.name
+    local = user_profile / "AppData" / "Local"
+    roaming = user_profile / "AppData" / "Roaming"
+    local_low = user_profile / "AppData" / "LocalLow"
+
+    c.add(
+        local / "D3DSCache",
+        "图形/系统缓存",
+        f"{user_label} DirectX 着色器缓存",
+        mode="contents",
+        recommended=True,
+        source="WDC 报告规则",
+        description="DirectX/D3D 着色器缓存，会按需重建。",
+    )
+    c.add(
+        local_low / "Microsoft" / "CryptnetUrlCache",
+        "系统/临时文件",
+        f"{user_label} CryptnetUrlCache",
+        mode="contents",
+        recommended=True,
+        source="WDC 报告规则",
+        description="Windows 证书/URL 校验缓存，会按需重建。",
+    )
+    collect_matching_files(
+        c,
+        local / "Microsoft" / "Windows" / "WebCache",
+        ("*.log", "*tmp.log"),
+        "系统/临时文件",
+        f"{user_label} Windows WebCache 日志",
+        recommended=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        local / "Microsoft" / "Windows" / "WebCache.old",
+        ("*.log", "*tmp.log"),
+        "系统/临时文件",
+        f"{user_label} Windows WebCache.old 日志",
+        recommended=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        local / "Microsoft" / "CLR_v4.0",
+        ("ngen.log",),
+        "系统日志",
+        f"{user_label} .NET NGen 日志",
+        recommended=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        local / "Microsoft" / "CLR_v4.0_32",
+        ("ngen.log",),
+        "系统日志",
+        f"{user_label} .NET NGen 32 位日志",
+        recommended=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        local / "Microsoft" / "OneDrive" / "setup" / "logs",
+        ("*.odl", "*.aodl", "*.log"),
+        "应用日志",
+        f"{user_label} OneDrive 安装日志",
+        recommended=True,
+        source="WDC 报告规则",
+        before_processes=("OneDrive.exe",),
+    )
+
+    start_menu_host = local / "Packages" / "Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy" / "TempState"
+    collect_matching_files(
+        c,
+        start_menu_host,
+        ("TileCache_*",),
+        "系统/临时文件",
+        f"{user_label} 开始菜单 TileCache",
+        recommended=True,
+        source="WDC 报告规则",
+    )
+
+    c.add(
+        user_profile / ".gradle" / "caches",
+        "开发缓存",
+        f"{user_label} Gradle 缓存",
+        mode="tree",
+        recommended=False,
+        source="WDC 报告规则",
+        description="Gradle 构建依赖和转换缓存；清理后下次构建会重新下载/生成。",
+    )
+
+    collect_browser_caches(c, roaming / "QQ" / "Partitions", f"{user_label} QQ NT")
+    collect_browser_caches(c, roaming / "Adobe", f"{user_label} Adobe/Photoshop")
+
+    known_wdc_appdata = [
+        (roaming / "CherryStudio" / "Code Cache", "应用缓存/更新包", "Cherry Studio Code Cache", True, ("Cherry Studio.exe", "CherryStudio.exe")),
+        (roaming / "CherryStudio" / "DawnGraphiteCache", "应用缓存/更新包", "Cherry Studio DawnGraphiteCache", True, ("Cherry Studio.exe", "CherryStudio.exe")),
+        (roaming / "CherryStudio" / "DawnWebGPUCache", "应用缓存/更新包", "Cherry Studio DawnWebGPUCache", True, ("Cherry Studio.exe", "CherryStudio.exe")),
+        (roaming / "CherryStudio" / "logs", "应用日志", "Cherry Studio 日志", True, ("Cherry Studio.exe", "CherryStudio.exe")),
+    ]
+    for path, category, name, recommended, processes in known_wdc_appdata:
+        c.add(
+            path,
+            category,
+            f"{user_label} {name}",
+            mode="tree",
+            recommended=recommended,
+            source="WDC 报告规则",
+            before_processes=processes,
         )
 
 
@@ -588,6 +784,8 @@ def collect_user_targets(c: TargetCollector, user_profile: Path) -> None:
     local = user_profile / "AppData" / "Local"
     roaming = user_profile / "AppData" / "Roaming"
     local_low = user_profile / "AppData" / "LocalLow"
+
+    collect_wdc_user_targets(c, user_profile)
 
     c.add(local / "Temp", "系统/临时文件", f"{user_label} 用户临时文件", mode="contents", recommended=True, source="前面扫描")
     c.add(local / "CrashDumps", "系统/临时文件", f"{user_label} 用户崩溃转储", mode="tree", recommended=True, source="帖子")
@@ -676,6 +874,8 @@ def collect_user_targets(c: TargetCollector, user_profile: Path) -> None:
 
 def collect_targets() -> list[Target]:
     program_data = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+    windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    system_root = Path(os.environ.get("SystemRoot", os.fspath(windows_dir)))
 
     c = TargetCollector()
 
@@ -683,9 +883,197 @@ def collect_targets() -> list[Target]:
         collect_user_targets(c, profile)
 
     collect_photoshop_temp_targets(c)
+    collect_qqmusic_cache_targets(c)
 
-    c.add(Path(r"C:\Windows\MEMORY.DMP"), "系统转储/高级项", "Windows MEMORY.DMP", mode="file", recommended=True, requires_admin=True, source="帖子")
-    for root in [Path(r"C:\Windows\LiveKernelReports"), Path(r"C:\Windows\Minidump")]:
+    c.add(windows_dir / "Temp", "系统/临时文件", "Windows Temp", mode="contents", recommended=True, requires_admin=True, source="WDC 报告规则")
+    c.add(
+        system_root / "System32" / "config" / "systemprofile" / "AppData" / "LocalLow" / "Microsoft" / "CryptnetUrlCache",
+        "系统/临时文件",
+        "systemprofile CryptnetUrlCache",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+        description="系统账户的证书/URL 校验缓存，会按需重建。",
+    )
+    c.add(
+        system_root / "Performance" / "WinSAT" / "DataStore",
+        "系统日志",
+        "WinSAT 性能评估历史日志",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    c.add(
+        program_data / "USOShared" / "Logs",
+        "系统日志",
+        "Windows Update USOShared 日志",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    c.add(
+        program_data / "Microsoft" / "Search" / "Data" / "Applications" / "Windows" / "GatherLogs",
+        "系统日志",
+        "Windows Search GatherLogs",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    c.add(
+        system_root / "System32" / "LogFiles" / "setupcln",
+        "系统日志",
+        "Windows setupcln 日志",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    c.add(
+        system_root / "System32" / "SleepStudy" / "ScreenOn",
+        "系统日志",
+        "SleepStudy ScreenOn 日志",
+        mode="contents",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    c.add(
+        system_root / "ServiceProfiles" / "LocalService" / "AppData" / "Local" / "FontCache",
+        "系统/临时文件",
+        "Windows 字体缓存",
+        mode="contents",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+        description="字体缓存会重建，运行中的字体缓存服务可能锁定文件。",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "CBS",
+        ("CbsPersist_*.cab", "CbsPersist_*.log"),
+        "系统日志",
+        "CBS 归档日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "DISM",
+        ("dism.log", "*.bak", "*.cab"),
+        "系统日志",
+        "DISM 日志",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "MoSetup",
+        ("*.xml", "*.etl", "*.log"),
+        "系统日志",
+        "MoSetup 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "NetSetup",
+        ("*.etl", "*.log"),
+        "系统日志",
+        "NetSetup 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "RecEnv_Ramdisk",
+        ("diag*.xml", "*.log"),
+        "系统日志",
+        "RecEnv_Ramdisk 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Logs" / "SetupCleanupTask",
+        ("diag*.xml", "*.log"),
+        "系统日志",
+        "SetupCleanupTask 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Panther",
+        ("diag*.xml",),
+        "系统日志",
+        "Windows Panther 诊断日志",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Panther" / "UnattendGC",
+        ("diag*.xml",),
+        "系统日志",
+        "Windows Panther UnattendGC 诊断日志",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Microsoft.NET" / "Framework" / "v4.0.30319",
+        ("ngen.log",),
+        "系统日志",
+        ".NET Framework NGen 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "Microsoft.NET" / "Framework64" / "v4.0.30319",
+        ("ngen.log",),
+        "系统日志",
+        ".NET Framework64 NGen 日志",
+        recommended=True,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "debug",
+        ("*.log", "*.LOG"),
+        "系统日志",
+        "Windows debug 日志",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+    collect_matching_files(
+        c,
+        system_root / "debug" / "WIA",
+        ("*.log", "*.LOG"),
+        "系统日志",
+        "Windows WIA debug 日志",
+        recommended=False,
+        requires_admin=True,
+        source="WDC 报告规则",
+    )
+
+    c.add(windows_dir / "MEMORY.DMP", "系统转储/高级项", "Windows MEMORY.DMP", mode="file", recommended=True, requires_admin=True, source="帖子")
+    for root in [windows_dir / "LiveKernelReports", windows_dir / "Minidump"]:
         if root.exists():
             for dmp in root.rglob("*.dmp"):
                 if dmp.is_file():
@@ -876,6 +1264,8 @@ class CleanerApp:
         self.worker_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.last_log_path: Path | None = None
         self.force_close_var = tk.BooleanVar(value=False)
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_text_var = tk.StringVar(value="空闲")
 
         self.build_ui()
         self.root.after(100, self.poll_queue)
@@ -919,6 +1309,27 @@ class CleanerApp:
 
         self.summary_var = tk.StringVar(value="准备扫描...")
         ttk.Label(self.root, textvariable=self.summary_var, padding=(12, 0)).pack(side=tk.TOP, fill=tk.X)
+
+        progress_frame = ttk.Frame(self.root, padding=(12, 0, 12, 10))
+        progress_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(progress_frame, textvariable=self.progress_text_var, width=36).pack(side=tk.LEFT, padx=(0, 10))
+        style = ttk.Style(self.root)
+        style.configure(
+            "Green.Horizontal.TProgressbar",
+            background="#22c55e",
+            troughcolor="#e5e7eb",
+            lightcolor="#22c55e",
+            darkcolor="#16a34a",
+            bordercolor="#bbf7d0",
+        )
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.progress_var,
+            maximum=100,
+            mode="determinate",
+            style="Green.Horizontal.TProgressbar",
+        )
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         main = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=8)
@@ -972,6 +1383,56 @@ class CleanerApp:
         self.log_text.insert(tk.END, f"[{stamp}] {message}\n")
         self.log_text.see(tk.END)
 
+    def start_busy_progress(self, text: str) -> None:
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate", maximum=100)
+        self.progress_var.set(0)
+        self.progress_text_var.set(text)
+        self.progress_bar.start(12)
+
+    def set_progress(self, value: int | float, maximum: int | float, text: str) -> None:
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate", maximum=max(1, maximum))
+        self.progress_var.set(value)
+        self.progress_text_var.set(text)
+
+    def update_summary(self) -> None:
+        total = sum((t.size or 0) for t in self.targets)
+        selected = sum((t.size or 0) for t in self.targets if t.selected)
+        self.summary_var.set(
+            f"发现 {len(self.targets)} 项，可选总占用 {format_size(total)}；当前勾选 {format_size(selected)}。"
+        )
+
+    def update_target_status(self, ident: str, status: str) -> None:
+        target = self.find_target(ident)
+        if not target:
+            return
+        target.status = status
+        if self.tree.exists(ident):
+            self.tree.item(ident, values=self.row_values(target))
+
+    def handle_target_done(self, payload: dict[str, object]) -> None:
+        ident = str(payload.get("ident", ""))
+        name = str(payload.get("name", ""))
+        status = str(payload.get("status", "已处理"))
+        ok = bool(payload.get("ok", False))
+        index = int(payload.get("index", 0) or 0)
+        total = int(payload.get("total", 1) or 1)
+        self.set_progress(index, total, f"已处理 {index}/{total}: {name}")
+
+        target = self.find_target(ident)
+        if ok:
+            if self.tree.exists(ident):
+                self.tree.delete(ident)
+            self.targets = [t for t in self.targets if t.ident != ident]
+        elif target:
+            target.status = status
+            target.selected = False
+            if self.tree.exists(ident):
+                self.tree.item(ident, values=self.row_values(target))
+        self.update_toggle_select_button()
+        self.update_summary()
+
     def poll_queue(self) -> None:
         try:
             while True:
@@ -980,12 +1441,36 @@ class CleanerApp:
                     self.targets = payload  # type: ignore[assignment]
                     self.refresh_tree()
                     self.log("扫描完成。")
+                    self.set_progress(100, 100, f"扫描完成：发现 {len(self.targets)} 项")
                 elif kind == "clean_done":
-                    self.log("清理完成，正在重新扫描。")
-                    self.scan_async()
+                    stats = payload if isinstance(payload, dict) else {}
+                    total = int(stats.get("total", 0) or 0)
+                    success = int(stats.get("success", 0) or 0)
+                    failed = int(stats.get("failed", 0) or 0)
+                    self.set_progress(total, max(1, total), f"清理完成：成功 {success} 项，失败/跳过 {failed} 项")
+                    self.log("清理完成。可点击“重新扫描占用”确认剩余项目。")
+                elif kind == "progress":
+                    if isinstance(payload, dict):
+                        self.set_progress(
+                            float(payload.get("value", 0) or 0),
+                            float(payload.get("maximum", 100) or 100),
+                            str(payload.get("text", "")),
+                        )
+                elif kind == "target_start":
+                    if isinstance(payload, dict):
+                        ident = str(payload.get("ident", ""))
+                        name = str(payload.get("name", ""))
+                        index = int(payload.get("index", 0) or 0)
+                        total = int(payload.get("total", 1) or 1)
+                        self.update_target_status(ident, "正在清理")
+                        self.set_progress(max(0, index - 1), total, f"正在清理 {index}/{total}: {name}")
+                elif kind == "target_done":
+                    if isinstance(payload, dict):
+                        self.handle_target_done(payload)
                 elif kind == "log":
                     self.log(str(payload))
                 elif kind == "error":
+                    self.set_progress(0, 100, "发生错误，请查看日志")
                     messagebox.showerror(APP_NAME, str(payload))
                     self.log(str(payload))
         except queue.Empty:
@@ -994,6 +1479,7 @@ class CleanerApp:
 
     def scan_async(self) -> None:
         self.summary_var.set("正在扫描，请稍候...")
+        self.start_busy_progress("正在扫描缓存和垃圾目录...")
         self.log("开始扫描缓存和垃圾目录。")
 
         def worker() -> None:
@@ -1009,14 +1495,10 @@ class CleanerApp:
 
     def refresh_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        total = sum((t.size or 0) for t in self.targets)
-        selected = sum((t.size or 0) for t in self.targets if t.selected)
         for target in self.targets:
             self.tree.insert("", tk.END, iid=target.ident, values=self.row_values(target))
         self.update_toggle_select_button()
-        self.summary_var.set(
-            f"发现 {len(self.targets)} 项，可选总占用 {format_size(total)}；当前勾选 {format_size(selected)}。"
-        )
+        self.update_summary()
 
     def row_values(self, target: Target) -> tuple[str, str, str, str, str, str, str, str]:
         mode_text = {
@@ -1067,11 +1549,7 @@ class CleanerApp:
         target.selected = not target.selected
         self.tree.item(ident, values=self.row_values(target))
         self.update_toggle_select_button()
-        selected = sum((t.size or 0) for t in self.targets if t.selected)
-        total = sum((t.size or 0) for t in self.targets)
-        self.summary_var.set(
-            f"发现 {len(self.targets)} 项，可选总占用 {format_size(total)}；当前勾选 {format_size(selected)}。"
-        )
+        self.update_summary()
 
     def select_recommended(self) -> None:
         for target in self.targets:
@@ -1122,6 +1600,12 @@ class CleanerApp:
             return
 
         force_close = self.force_close_var.get()
+        for target in selected:
+            target.status = "等待清理"
+            if self.tree.exists(target.ident):
+                self.tree.item(target.ident, values=self.row_values(target))
+        self.set_progress(0, len(selected), f"准备清理 0/{len(selected)}")
+        self.update_summary()
 
         def worker() -> None:
             log_path = self.make_log_path()
@@ -1131,19 +1615,30 @@ class CleanerApp:
                 for target in selected:
                     process_names.extend(infer_processes_for_target(target))
             if force_close and process_names:
+                self.worker_queue.put(("progress", {"value": 0, "maximum": len(selected), "text": "正在结束相关软件..."}))
                 self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关后台进程（跳过 Codex）。"))
                 kill_processes(process_names, lambda msg: self.worker_queue.put(("log", msg)))
 
+            success_count = 0
+            failed_count = 0
             with log_path.open("a", encoding="utf-8") as fp:
                 fp.write(f"{APP_NAME} 清理日志\n")
                 fp.write(f"时间: {dt.datetime.now():%Y-%m-%d %H:%M:%S}\n")
                 fp.write(f"管理员: {'是' if is_admin() else '否'}\n\n")
                 fp.write(f"强制关闭相关软件: {'是' if force_close else '否'}\n\n")
-                for target in selected:
+                for index, target in enumerate(selected, start=1):
                     before = target.size or 0
+                    self.worker_queue.put((
+                        "target_start",
+                        {"ident": target.ident, "index": index, "total": len(selected), "name": target.name},
+                    ))
                     self.worker_queue.put(("log", f"清理: {target.name} - {target.path}"))
                     ok, errors = clean_target(target, lambda msg: self.worker_queue.put(("log", msg)))
                     status = "成功" if ok else "部分失败/跳过"
+                    if ok:
+                        success_count += 1
+                    else:
+                        failed_count += 1
                     fp.write(f"[{status}] {target.category} | {target.name}\n")
                     fp.write(f"路径/动作: {target.path if target.mode != 'command' else ' '.join(target.command or [])}\n")
                     fp.write(f"扫描占用: {format_size(before)}\n")
@@ -1153,8 +1648,19 @@ class CleanerApp:
                             fp.write(f"  - {err}\n")
                             self.worker_queue.put(("log", err))
                     fp.write("\n")
+                    self.worker_queue.put((
+                        "target_done",
+                        {
+                            "ident": target.ident,
+                            "ok": ok,
+                            "index": index,
+                            "total": len(selected),
+                            "name": target.name,
+                            "status": status,
+                        },
+                    ))
             self.worker_queue.put(("log", f"日志已写入: {log_path}"))
-            self.worker_queue.put(("clean_done", None))
+            self.worker_queue.put(("clean_done", {"total": len(selected), "success": success_count, "failed": failed_count}))
 
         threading.Thread(target=worker, daemon=True).start()
 
