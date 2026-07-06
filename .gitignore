@@ -4,3 +4,4 @@ build/
 *.spec
 AppDataCleaner_logs/
 scan_preview*.json
+版本/
