@@ -149,6 +149,7 @@ CODEX_PROCESS_NAMES = {
     "appdatacleaner_v7.exe",
     "appdatacleaner_v8.exe",
     "appdatacleaner_v9.exe",
+    "appdatacleaner_v10.exe",
 }
 
 PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -164,8 +165,8 @@ PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\doubao\\", ("Doubao.exe", "doubao.exe")),
     ("\\quark\\", ("Quark.exe", "quark.exe")),
     ("\\baidunetdisk\\", ("baidunetdisk.exe", "BaiduNetdisk.exe", "baidunetdiskhost.exe")),
-    ("\\tencent\\xwechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe")),
-    ("\\wechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe")),
+    ("\\tencent\\xwechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe", "WeChatOCR.exe", "WeChatUpdate.exe", "WeChatCrashRpt.exe")),
+    ("\\wechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe", "WeChatOCR.exe", "WeChatUpdate.exe", "WeChatCrashRpt.exe")),
     ("\\tencent\\androws\\", ("Androws.exe", "WeChat.exe", "WeChatAppEx.exe")),
     ("\\wxwork\\", ("WXWork.exe", "WXWorkWeb.exe")),
     ("\\ali1688workbench\\", ("AliWorkbench.exe", "AliWorkbenchHelper.exe", "AliApp.exe", "AliIM.exe")),
@@ -179,9 +180,16 @@ PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\cherrystudio\\", ("Cherry Studio.exe", "CherryStudio.exe")),
     ("\\ichat\\", ("iChat.exe", "ichat.exe")),
     ("\\onedrive\\", ("OneDrive.exe",)),
-    ("\\microsoft\\windows\\explorer\\", ("explorer.exe",)),
-    ("\\microsoft\\windows\\caches\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe")),
-    ("\\microsoft.windows.startmenuexperiencehost_", ("StartMenuExperienceHost.exe",)),
+    ("\\appdata\\local\\temp\\", ("360tray.exe", "360safe.exe", "360sd.exe", "360bpsvc.exe", "360rp.exe", "360msgcenter.exe", "360speedld.exe", "SoftMgr.exe", "Doubao.exe", "doubao.exe", "DoubaoLauncher.exe", "virtual_camera.exe")),
+    ("\\local\\temp\\360gameinst_", ("360tray.exe", "360safe.exe", "360sd.exe", "360bpsvc.exe", "360rp.exe", "360msgcenter.exe", "360speedld.exe", "SoftMgr.exe")),
+    ("\\local\\temp\\doubao_ext\\", ("Doubao.exe", "doubao.exe", "DoubaoLauncher.exe")),
+    ("\\local\\temp\\virtual_camera\\", ("virtual_camera.exe", "WeChat.exe", "WeChatAppEx.exe")),
+    ("\\windows\\temp\\", ("virtual_camera.exe",)),
+    ("\\microsoft\\windows\\webcache\\", ("dllhost.exe", "taskhostw.exe", "RuntimeBroker.exe")),
+    ("\\microsoft\\windows\\explorer\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
+    ("\\microsoft\\windows\\caches\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
+    ("\\microsoft.windows.startmenuexperiencehost_", ("StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
+    ("\\microsoft\\search\\data\\applications\\windows\\gatherlogs\\", ("SearchIndexer.exe", "SearchProtocolHost.exe", "SearchFilterHost.exe")),
 )
 
 SERVICE_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -189,10 +197,18 @@ SERVICE_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\360chrome\\", ("360bpsvc",)),
     ("\\360chromex\\", ("360bpsvc",)),
     ("\\360browser\\", ("360bpsvc",)),
+    ("\\fontcache\\", ("FontCache", "FontCache3.0.0.0")),
+    ("\\microsoft\\search\\data\\applications\\windows\\gatherlogs\\", ("WSearch",)),
 )
 
 RESTART_AFTER_KILL = {
     "explorer.exe",
+}
+
+RESTART_AFTER_SERVICE_STOP = {
+    "fontcache",
+    "fontcache3.0.0.0",
+    "wsearch",
 }
 
 
@@ -231,6 +247,36 @@ def is_child_path(child: Path | str, parent: Path | str) -> bool:
         return os.path.commonpath([child_norm, parent_norm]) == parent_norm
     except ValueError:
         return False
+
+
+def is_same_or_child_path(child: Path | str, parent: Path | str) -> bool:
+    return norm_path(child) == norm_path(parent) or is_child_path(child, parent)
+
+
+def current_runtime_roots() -> list[Path]:
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass))
+    return roots
+
+
+def is_codex_runtime_path(path: Path | str) -> bool:
+    lowered = norm_path(path).lower()
+    marker = "\\appdata\\roaming\\codex"
+    return marker in lowered and (lowered.endswith(marker) or f"{marker}\\" in lowered)
+
+
+def is_current_runtime_path(path: Path | str) -> bool:
+    return any(is_same_or_child_path(path, root) for root in current_runtime_roots())
+
+
+def is_runtime_protected_path(path: Path | str) -> bool:
+    return is_codex_runtime_path(path) or is_current_runtime_path(path)
+
+
+def should_skip_delete_path(path: Path | str) -> bool:
+    return contains_protected_component(path) or is_runtime_protected_path(path) or is_reparse_path(path)
 
 
 def format_size(size: int | None) -> str:
@@ -313,7 +359,7 @@ def directory_size(path: Path | str) -> tuple[int, int]:
                 st = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
-            if contains_protected_component(entry.path):
+            if contains_protected_component(entry.path) or is_runtime_protected_path(entry.path):
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -394,10 +440,7 @@ def remove_any(path: Path | str, errors: list[str], retry_passes: int = 2) -> bo
     p = Path(path)
     if not p.exists() and not p.is_symlink():
         return True
-    if contains_protected_component(p):
-        return True
-    if is_reparse_path(p):
-        errors.append(f"跳过符号链接/联接点: {p}")
+    if should_skip_delete_path(p):
         return False
     if p.is_dir():
         last_errors: list[str] = []
@@ -420,8 +463,7 @@ def remove_contents(path: Path | str, errors: list[str]) -> None:
     p = Path(path)
     if not p.exists() or not p.is_dir():
         return
-    if is_reparse_path(p):
-        errors.append(f"跳过符号链接/联接点: {p}")
+    if is_reparse_path(p) or is_runtime_protected_path(p):
         return
     last_errors: list[str] = []
     for pass_index in range(2):
@@ -484,6 +526,8 @@ class TargetCollector:
         allow_protected: bool = False,
     ) -> None:
         p = Path(path)
+        if is_runtime_protected_path(p):
+            return
         if not allow_protected and contains_protected_component(p):
             return
         key = (norm_path(p), mode)
@@ -509,7 +553,7 @@ class TargetCollector:
 
 
 def walk_dirs_limited(root: Path, max_depth: int = 5) -> Iterable[Path]:
-    if not root.exists() or not root.is_dir() or is_reparse_path(root):
+    if not root.exists() or not root.is_dir() or is_reparse_path(root) or is_runtime_protected_path(root):
         return
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
@@ -526,6 +570,8 @@ def walk_dirs_limited(root: Path, max_depth: int = 5) -> Iterable[Path]:
             except OSError:
                 continue
             p = Path(entry.path)
+            if is_runtime_protected_path(p):
+                continue
             yield p
             if not contains_protected_component(p):
                 stack.append((p, depth + 1))
@@ -550,7 +596,7 @@ def collect_browser_caches(collector: TargetCollector, root: Path, label: str) -
             cache_dir,
             "浏览器/Chromium 缓存",
             f"{label} - {cache_dir.name}",
-            mode="tree",
+            mode="contents",
             recommended=True,
             description="浏览器缓存、渲染缓存、安全列表或崩溃日志；不包含 Cookies、Login Data、Local Storage、IndexedDB。",
             source="前面扫描 + Chrome/Chromium 保护规则",
@@ -577,7 +623,7 @@ def collect_named_cache_dirs(
             d,
             category,
             f"{label} - {d.name}",
-            mode="tree",
+            mode="contents",
             recommended=True,
             description="按批处理脚本规则匹配到的 cache 目录。",
             source="清理千牛和1688缓存输出日志.bat",
@@ -597,13 +643,13 @@ def collect_matching_files(
     source: str = "",
     before_processes: tuple[str, ...] = (),
 ) -> None:
-    if not root.exists() or not root.is_dir() or is_reparse_path(root):
+    if not root.exists() or not root.is_dir() or is_reparse_path(root) or is_runtime_protected_path(root):
         return
     for pattern in patterns:
         try:
             matches = root.glob(pattern)
             for item in matches:
-                if not item.is_file() or is_reparse_path(item):
+                if not item.is_file() or is_reparse_path(item) or is_runtime_protected_path(item):
                     continue
                 collector.add(
                     item,
@@ -666,7 +712,7 @@ def collect_roaming_safe_caches(collector: TargetCollector, root: Path) -> None:
             cache_dir,
             "Roaming 安全缓存",
             f"{cache_dir.parent.name} - {cache_dir.name}",
-            mode="tree",
+            mode="contents",
             recommended=True,
             description="Roaming 下自动发现的缓存、日志、崩溃记录、更新残留或临时目录；已排除登录/cookies/本地站点数据相关路径。",
             source="Roaming 扫描",
@@ -821,6 +867,8 @@ def top_under(root: Path, path: Path) -> str:
 def is_empty_dir_candidate(root: Path, path: Path) -> bool:
     if not path.exists() or not path.is_dir() or is_reparse_path(path):
         return False
+    if is_runtime_protected_path(path):
+        return False
     if top_under(root, path) in EMPTY_DIR_SKIP_TOP:
         return False
     if contains_protected_component(path):
@@ -890,25 +938,25 @@ def collect_user_targets(c: TargetCollector, user_profile: Path) -> None:
     c.add(local / "Package Cache", "系统转储/高级项", f"{user_label} 用户级 Package Cache", mode="tree", recommended=False, source="帖子")
 
     known_appdata = [
-        (local / "JianyingPro" / "User Data" / "Cache", "应用缓存/更新包", "剪映缓存", True),
-        (local / "JianyingPro" / "User Data" / "Download", "应用缓存/更新包", "剪映下载更新包", True),
-        (roaming / "Tencent" / "xwechat" / "update", "应用缓存/更新包", "微信 xwechat 更新包", True),
-        (roaming / "Tencent" / "xwechat" / "log", "应用缓存/更新包", "微信 xwechat 日志", True),
-        (roaming / "Tencent" / "xwechat" / "crashinfo", "应用缓存/更新包", "微信 xwechat 崩溃记录", True),
-        (roaming / "kingsoft" / "office6" / "backup", "应用缓存/更新包", "WPS/Kingsoft 备份缓存", True),
-        (roaming / "kingsoft" / "office6" / "update", "应用缓存/更新包", "WPS 更新包", True),
-        (roaming / "kingsoft" / "office6" / "cache", "应用缓存/更新包", "WPS 缓存", True),
-        (roaming / "kingsoft" / "office6" / "log", "应用缓存/更新包", "WPS 日志", True),
-        (roaming / "XMind" / "Electron v3" / "vana" / "auto-updater", "应用缓存/更新包", "XMind 自动更新缓存", True),
-        (local / "xmind-updater", "应用缓存/更新包", "XMind 更新器残留", True),
-        (local / "Quark" / "User Data" / "QianwenInstaller", "应用缓存/更新包", "夸克里的千问安装包", True),
-        (local / "Qianwen" / "User Data" / "updates", "应用缓存/更新包", "千问更新包", True),
-        (roaming / "baidunetdisk" / "Cache" / "Cache_Data", "应用缓存/更新包", "百度网盘 Cache_Data", True),
-        (roaming / "baidunetdisk" / "Code Cache", "应用缓存/更新包", "百度网盘 Code Cache", True),
-        (roaming / "baidunetdisk" / "GPUCache", "应用缓存/更新包", "百度网盘 GPUCache", True),
+        (local / "JianyingPro" / "User Data" / "Cache", "应用缓存/更新包", "剪映缓存", True, "contents"),
+        (local / "JianyingPro" / "User Data" / "Download", "应用缓存/更新包", "剪映下载更新包", True, "contents"),
+        (roaming / "Tencent" / "xwechat" / "update", "应用缓存/更新包", "微信 xwechat 更新包", True, "contents"),
+        (roaming / "Tencent" / "xwechat" / "log", "应用缓存/更新包", "微信 xwechat 日志", True, "contents"),
+        (roaming / "Tencent" / "xwechat" / "crashinfo", "应用缓存/更新包", "微信 xwechat 崩溃记录", True, "contents"),
+        (roaming / "kingsoft" / "office6" / "backup", "应用缓存/更新包", "WPS/Kingsoft 备份缓存", True, "contents"),
+        (roaming / "kingsoft" / "office6" / "update", "应用缓存/更新包", "WPS 更新包", True, "contents"),
+        (roaming / "kingsoft" / "office6" / "cache", "应用缓存/更新包", "WPS 缓存", True, "contents"),
+        (roaming / "kingsoft" / "office6" / "log", "应用缓存/更新包", "WPS 日志", True, "contents"),
+        (roaming / "XMind" / "Electron v3" / "vana" / "auto-updater", "应用缓存/更新包", "XMind 自动更新缓存", True, "contents"),
+        (local / "xmind-updater", "应用缓存/更新包", "XMind 更新器残留", True, "tree"),
+        (local / "Quark" / "User Data" / "QianwenInstaller", "应用缓存/更新包", "夸克里的千问安装包", True, "contents"),
+        (local / "Qianwen" / "User Data" / "updates", "应用缓存/更新包", "千问更新包", True, "contents"),
+        (roaming / "baidunetdisk" / "Cache" / "Cache_Data", "应用缓存/更新包", "百度网盘 Cache_Data", True, "contents"),
+        (roaming / "baidunetdisk" / "Code Cache", "应用缓存/更新包", "百度网盘 Code Cache", True, "contents"),
+        (roaming / "baidunetdisk" / "GPUCache", "应用缓存/更新包", "百度网盘 GPUCache", True, "contents"),
     ]
-    for path, category, name, recommended in known_appdata:
-        c.add(path, category, f"{user_label} {name}", mode="tree", recommended=recommended, source="前面扫描")
+    for path, category, name, recommended, mode in known_appdata:
+        c.add(path, category, f"{user_label} {name}", mode=mode, recommended=recommended, source="前面扫描")
 
     for base in (local, roaming):
         if not base.exists():
@@ -1266,7 +1314,8 @@ def run_command(command: list[str], log: Callable[[str], None]) -> bool:
         return False
 
 
-def stop_services(service_names: Iterable[str], log: Callable[[str], None]) -> None:
+def stop_services(service_names: Iterable[str], log: Callable[[str], None]) -> set[str]:
+    stopped: set[str] = set()
     for name in sorted({s for s in service_names if s}):
         try:
             completed = subprocess.run(
@@ -1277,16 +1326,36 @@ def stop_services(service_names: Iterable[str], log: Callable[[str], None]) -> N
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if completed.returncode == 0:
+                stopped.add(name.lower())
                 log(f"已尝试停止服务: {name}")
             elif completed.stdout.strip() or completed.stderr.strip():
                 log(f"停止服务未完成 {name}: {(completed.stdout or completed.stderr).strip()}")
         except Exception as exc:
             log(f"停止服务失败 {name}: {exc}")
+    return stopped
+
+
+def restart_services(service_names: Iterable[str], log: Callable[[str], None]) -> None:
+    for name in sorted({s for s in service_names if s.lower() in RESTART_AFTER_SERVICE_STOP}):
+        try:
+            completed = subprocess.run(
+                ["sc", "start", name],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode == 0:
+                log(f"已尝试启动服务: {name}")
+            elif completed.stdout.strip() or completed.stderr.strip():
+                log(f"启动服务未完成 {name}: {(completed.stdout or completed.stderr).strip()}")
+        except Exception as exc:
+            log(f"启动服务失败 {name}: {exc}")
 
 
 def kill_processes(process_names: Iterable[str], log: Callable[[str], None]) -> set[str]:
     killed: set[str] = set()
-    for name in sorted({p for p in process_names if p and p.lower() not in CODEX_PROCESS_NAMES}):
+    for name in sorted({p for p in process_names if p and p.lower() not in CODEX_PROCESS_NAMES and not p.lower().startswith("appdatacleaner")}):
         if not name:
             continue
         try:
@@ -1321,18 +1390,20 @@ def infer_processes_for_target(target: Target) -> tuple[str, ...]:
     lowered = os.fspath(target.path).lower()
     if "\\roaming\\codex\\" in lowered or "\\appdatacleaner" in lowered:
         return ()
+    match_text = lowered if lowered.endswith("\\") else f"{lowered}\\"
     processes: list[str] = list(target.before_processes)
     for marker, names in PATH_PROCESS_RULES:
-        if marker in lowered:
+        if marker in match_text:
             processes.extend(names)
     return tuple(processes)
 
 
 def infer_services_for_target(target: Target) -> tuple[str, ...]:
     lowered = os.fspath(target.path).lower()
+    match_text = lowered if lowered.endswith("\\") else f"{lowered}\\"
     services: list[str] = []
     for marker, names in SERVICE_PROCESS_RULES:
-        if marker in lowered:
+        if marker in match_text:
             services.extend(names)
     return tuple(services)
 
@@ -1347,6 +1418,9 @@ def clean_target(target: Target, log: Callable[[str], None]) -> tuple[bool, list
         return False, errors
     if target.mode != "command" and contains_protected_component(target.path):
         errors.append("命中登录/cookies/站点数据保护名单，已阻止。")
+        return False, errors
+    if target.mode != "command" and is_runtime_protected_path(target.path):
+        errors.append("目标属于 Codex 或当前清理器运行目录，已跳过。")
         return False, errors
 
     if target.mode == "empty_dirs":
@@ -1746,10 +1820,11 @@ class CleanerApp:
                     process_names.extend(infer_processes_for_target(target))
                     service_names.extend(infer_services_for_target(target))
             killed_processes: set[str] = set()
+            stopped_services: set[str] = set()
             if force_close and (process_names or service_names):
                 self.worker_queue.put(("progress", {"value": 0, "maximum": len(selected), "text": "正在结束相关软件..."}))
                 self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关后台进程/服务（跳过 Codex）。"))
-                stop_services(service_names, lambda msg: self.worker_queue.put(("log", msg)))
+                stopped_services = stop_services(service_names, lambda msg: self.worker_queue.put(("log", msg)))
                 killed_processes = kill_processes(process_names, lambda msg: self.worker_queue.put(("log", msg)))
                 time.sleep(0.8)
 
@@ -1794,6 +1869,8 @@ class CleanerApp:
                         },
                     ))
             self.worker_queue.put(("log", f"日志已写入: {log_path}"))
+            if stopped_services:
+                restart_services(stopped_services, lambda msg: self.worker_queue.put(("log", msg)))
             if killed_processes:
                 restart_processes(killed_processes, lambda msg: self.worker_queue.put(("log", msg)))
             self.worker_queue.put(("clean_done", {"total": len(selected), "success": success_count, "failed": failed_count}))
