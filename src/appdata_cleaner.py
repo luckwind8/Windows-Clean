@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -147,32 +148,52 @@ CODEX_PROCESS_NAMES = {
     "appdatacleaner_v6.exe",
     "appdatacleaner_v7.exe",
     "appdatacleaner_v8.exe",
+    "appdatacleaner_v9.exe",
 }
 
 PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\microsoft\\edge\\", ("msedge.exe",)),
     ("\\google\\chrome\\", ("chrome.exe",)),
-    ("\\360chrome\\", ("360chrome.exe", "360chromeX.exe", "360se.exe")),
-    ("\\360chromex\\", ("360chromeX.exe", "360chrome.exe", "360se.exe")),
-    ("\\360se6\\", ("360se.exe", "360chrome.exe", "360chromeX.exe")),
-    ("\\360browser\\", ("360se.exe", "360chrome.exe", "360chromeX.exe")),
-    ("\\kingsoft\\", ("wps.exe", "et.exe", "wpp.exe", "wpscloudsvr.exe", "qing.exe", "promecefpluginhost.exe", "aspcenter.exe")),
+    ("\\360chrome\\", ("360chrome.exe", "360chromeX.exe", "360se.exe", "SunBrowser.exe", "360bpsvc.exe")),
+    ("\\360chromex\\", ("360chromeX.exe", "360chrome.exe", "360se.exe", "SunBrowser.exe", "360bpsvc.exe")),
+    ("\\360se6\\", ("360se.exe", "360chrome.exe", "360chromeX.exe", "SunBrowser.exe", "360bpsvc.exe")),
+    ("\\360browser\\", ("360se.exe", "360chrome.exe", "360chromeX.exe", "SunBrowser.exe", "360bpsvc.exe")),
+    ("\\360safe\\", ("360tray.exe", "360safe.exe", "360sd.exe", "360bpsvc.exe", "360rp.exe", "360msgcenter.exe", "360speedld.exe", "SoftMgr.exe")),
+    ("\\kingsoft\\", ("wps.exe", "et.exe", "wpp.exe", "wpspdf.exe", "wpsoffice.exe", "wpscloudsvr.exe", "wpscloudlaunch.exe", "wpscenter.exe", "wpsupdate.exe", "qing.exe", "promecefpluginhost.exe", "aspcenter.exe", "ksolaunch.exe")),
     ("\\qianwen\\", ("Qianwen.exe", "qianwen.exe")),
     ("\\doubao\\", ("Doubao.exe", "doubao.exe")),
     ("\\quark\\", ("Quark.exe", "quark.exe")),
     ("\\baidunetdisk\\", ("baidunetdisk.exe", "BaiduNetdisk.exe", "baidunetdiskhost.exe")),
-    ("\\tencent\\xwechat\\", ("WeChat.exe", "WeChatAppEx.exe")),
-    ("\\wechat\\", ("WeChat.exe", "WeChatAppEx.exe")),
+    ("\\tencent\\xwechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe")),
+    ("\\wechat\\", ("WeChat.exe", "WeChatAppEx.exe", "WeChatBrowser.exe", "WeChatPlayer.exe", "WeChatUtility.exe")),
+    ("\\tencent\\androws\\", ("Androws.exe", "WeChat.exe", "WeChatAppEx.exe")),
     ("\\wxwork\\", ("WXWork.exe", "WXWorkWeb.exe")),
-    ("\\1688cef\\", ("AliWorkbench.exe",)),
-    ("\\qianniucef\\", ("AliWorkbench.exe",)),
+    ("\\ali1688workbench\\", ("AliWorkbench.exe", "AliWorkbenchHelper.exe", "AliApp.exe", "AliIM.exe")),
+    ("\\aliworkbench\\", ("AliWorkbench.exe", "AliWorkbenchHelper.exe", "AliApp.exe", "AliIM.exe")),
+    ("\\1688cef\\", ("AliWorkbench.exe", "AliWorkbenchHelper.exe")),
+    ("\\qianniucef\\", ("AliWorkbench.exe", "AliWorkbenchHelper.exe")),
     ("\\adspower_global\\", ("AdsPower Global.exe", "adspower_global.exe")),
     ("\\spchrome\\", ("SPChrome.exe", "chrome.exe")),
     ("\\roaming\\qq\\", ("QQ.exe",)),
     ("\\qqmusiccache\\", ("QQMusic.exe",)),
     ("\\cherrystudio\\", ("Cherry Studio.exe", "CherryStudio.exe")),
+    ("\\ichat\\", ("iChat.exe", "ichat.exe")),
     ("\\onedrive\\", ("OneDrive.exe",)),
+    ("\\microsoft\\windows\\explorer\\", ("explorer.exe",)),
+    ("\\microsoft\\windows\\caches\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe")),
+    ("\\microsoft.windows.startmenuexperiencehost_", ("StartMenuExperienceHost.exe",)),
 )
+
+SERVICE_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("\\360safe\\", ("360bpsvc",)),
+    ("\\360chrome\\", ("360bpsvc",)),
+    ("\\360chromex\\", ("360bpsvc",)),
+    ("\\360browser\\", ("360bpsvc",)),
+)
+
+RESTART_AFTER_KILL = {
+    "explorer.exe",
+}
 
 
 def is_admin() -> bool:
@@ -322,29 +343,77 @@ def make_writable(path: Path | str) -> None:
         pass
 
 
-def remove_any(path: Path | str, errors: list[str]) -> None:
+def force_unlock_attrs(path: Path | str) -> None:
+    try:
+        subprocess.run(
+            ["attrib", "-R", "-S", "-H", os.fspath(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        pass
+
+
+def remove_file_with_retries(path: Path, errors: list[str], retries: int = 3) -> bool:
+    last_exc: OSError | None = None
+    for attempt in range(retries):
+        try:
+            make_writable(path)
+            force_unlock_attrs(path)
+            path.unlink()
+            return True
+        except OSError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.2 * (attempt + 1))
+    if last_exc:
+        errors.append(f"删除文件失败: {path} ({last_exc})")
+    return False
+
+
+def remove_dir_with_retries(path: Path, errors: list[str], retries: int = 3) -> bool:
+    last_exc: OSError | None = None
+    for attempt in range(retries):
+        try:
+            make_writable(path)
+            force_unlock_attrs(path)
+            path.rmdir()
+            return True
+        except OSError as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(0.2 * (attempt + 1))
+    if last_exc:
+        errors.append(f"删除目录失败: {path} ({last_exc})")
+    return False
+
+
+def remove_any(path: Path | str, errors: list[str], retry_passes: int = 2) -> bool:
     p = Path(path)
     if not p.exists() and not p.is_symlink():
-        return
+        return True
     if contains_protected_component(p):
-        return
+        return True
     if is_reparse_path(p):
         errors.append(f"跳过符号链接/联接点: {p}")
-        return
+        return False
     if p.is_dir():
-        for entry in safe_scandir(p):
-            remove_any(entry.path, errors)
-        try:
-            make_writable(p)
-            p.rmdir()
-        except OSError as exc:
-            errors.append(f"删除目录失败: {p} ({exc})")
-    else:
-        try:
-            make_writable(p)
-            p.unlink()
-        except OSError as exc:
-            errors.append(f"删除文件失败: {p} ({exc})")
+        last_errors: list[str] = []
+        for pass_index in range(max(1, retry_passes)):
+            pass_errors: list[str] = []
+            for entry in safe_scandir(p):
+                remove_any(entry.path, pass_errors, retry_passes=1)
+            if not any(True for _entry in safe_scandir(p)):
+                last_errors = []
+                break
+            last_errors = pass_errors
+            if pass_index < retry_passes - 1:
+                time.sleep(0.2 * (pass_index + 1))
+        errors.extend(last_errors)
+        return remove_dir_with_retries(p, errors)
+    return remove_file_with_retries(p, errors)
 
 
 def remove_contents(path: Path | str, errors: list[str]) -> None:
@@ -354,8 +423,18 @@ def remove_contents(path: Path | str, errors: list[str]) -> None:
     if is_reparse_path(p):
         errors.append(f"跳过符号链接/联接点: {p}")
         return
-    for entry in safe_scandir(p):
-        remove_any(entry.path, errors)
+    last_errors: list[str] = []
+    for pass_index in range(2):
+        pass_errors: list[str] = []
+        for entry in safe_scandir(p):
+            remove_any(entry.path, pass_errors, retry_passes=1)
+        if not any(True for _entry in safe_scandir(p)):
+            last_errors = []
+            break
+        last_errors = pass_errors
+        if pass_index == 0:
+            time.sleep(0.3)
+    errors.extend(last_errors)
 
 
 @dataclass
@@ -1187,15 +1266,55 @@ def run_command(command: list[str], log: Callable[[str], None]) -> bool:
         return False
 
 
-def kill_processes(process_names: Iterable[str], log: Callable[[str], None]) -> None:
+def stop_services(service_names: Iterable[str], log: Callable[[str], None]) -> None:
+    for name in sorted({s for s in service_names if s}):
+        try:
+            completed = subprocess.run(
+                ["sc", "stop", name],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode == 0:
+                log(f"已尝试停止服务: {name}")
+            elif completed.stdout.strip() or completed.stderr.strip():
+                log(f"停止服务未完成 {name}: {(completed.stdout or completed.stderr).strip()}")
+        except Exception as exc:
+            log(f"停止服务失败 {name}: {exc}")
+
+
+def kill_processes(process_names: Iterable[str], log: Callable[[str], None]) -> set[str]:
+    killed: set[str] = set()
     for name in sorted({p for p in process_names if p and p.lower() not in CODEX_PROCESS_NAMES}):
         if not name:
             continue
         try:
-            subprocess.run(["taskkill", "/F", "/IM", name, "/T"], capture_output=True, text=True, timeout=15)
-            log(f"已尝试结束进程: {name}")
+            completed = subprocess.run(
+                ["taskkill", "/F", "/IM", name, "/T"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode == 0:
+                killed.add(name.lower())
+                log(f"已结束进程: {name}")
+            elif "not found" not in (completed.stderr + completed.stdout).lower() and "找不到" not in (completed.stderr + completed.stdout):
+                log(f"结束进程未完成 {name}: {(completed.stdout or completed.stderr).strip()}")
         except Exception as exc:
             log(f"结束进程失败 {name}: {exc}")
+    return killed
+
+
+def restart_processes(process_names: Iterable[str], log: Callable[[str], None]) -> None:
+    for name in sorted({p.lower() for p in process_names} & RESTART_AFTER_KILL):
+        if name == "explorer.exe":
+            try:
+                subprocess.Popen(["explorer.exe"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                log("已重新启动资源管理器 explorer.exe")
+            except Exception as exc:
+                log(f"重启资源管理器失败: {exc}")
 
 
 def infer_processes_for_target(target: Target) -> tuple[str, ...]:
@@ -1207,6 +1326,15 @@ def infer_processes_for_target(target: Target) -> tuple[str, ...]:
         if marker in lowered:
             processes.extend(names)
     return tuple(processes)
+
+
+def infer_services_for_target(target: Target) -> tuple[str, ...]:
+    lowered = os.fspath(target.path).lower()
+    services: list[str] = []
+    for marker, names in SERVICE_PROCESS_RULES:
+        if marker in lowered:
+            services.extend(names)
+    return tuple(services)
 
 
 def clean_target(target: Target, log: Callable[[str], None]) -> tuple[bool, list[str]]:
@@ -1593,8 +1721,9 @@ class CleanerApp:
             message += f"\n其中 {admin_count} 项需要管理员权限。"
         if self.force_close_var.get():
             process_count = len({p.lower() for target in selected for p in infer_processes_for_target(target)})
-            if process_count:
-                message += f"\n已勾选强制关闭：清理前会尝试结束 {process_count} 类相关软件进程，不会关闭 Codex。"
+            service_count = len({s.lower() for target in selected for s in infer_services_for_target(target)})
+            if process_count or service_count:
+                message += f"\n已勾选强制关闭：清理前会尝试结束 {process_count} 类进程、停止 {service_count} 类服务，不会关闭 Codex。"
         message += "\n\n会继续保护 Cookies、Login Data、Local Storage、IndexedDB 等登录相关数据。确认开始？"
         if not messagebox.askyesno(APP_NAME, message):
             return
@@ -1611,13 +1740,18 @@ class CleanerApp:
             log_path = self.make_log_path()
             self.last_log_path = log_path
             process_names = []
+            service_names = []
             if force_close:
                 for target in selected:
                     process_names.extend(infer_processes_for_target(target))
-            if force_close and process_names:
+                    service_names.extend(infer_services_for_target(target))
+            killed_processes: set[str] = set()
+            if force_close and (process_names or service_names):
                 self.worker_queue.put(("progress", {"value": 0, "maximum": len(selected), "text": "正在结束相关软件..."}))
-                self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关后台进程（跳过 Codex）。"))
-                kill_processes(process_names, lambda msg: self.worker_queue.put(("log", msg)))
+                self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关后台进程/服务（跳过 Codex）。"))
+                stop_services(service_names, lambda msg: self.worker_queue.put(("log", msg)))
+                killed_processes = kill_processes(process_names, lambda msg: self.worker_queue.put(("log", msg)))
+                time.sleep(0.8)
 
             success_count = 0
             failed_count = 0
@@ -1660,6 +1794,8 @@ class CleanerApp:
                         },
                     ))
             self.worker_queue.put(("log", f"日志已写入: {log_path}"))
+            if killed_processes:
+                restart_processes(killed_processes, lambda msg: self.worker_queue.put(("log", msg)))
             self.worker_queue.put(("clean_done", {"total": len(selected), "success": success_count, "failed": failed_count}))
 
         threading.Thread(target=worker, daemon=True).start()
