@@ -152,6 +152,20 @@ CODEX_PROCESS_NAMES = {
     "appdatacleaner_v10.exe",
 }
 
+NEVER_KILL_PROCESS_NAMES = CODEX_PROCESS_NAMES | {
+    "explorer.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+    "searchhost.exe",
+    "searchindexer.exe",
+    "searchprotocolhost.exe",
+    "searchfilterhost.exe",
+    "runtimebroker.exe",
+    "dllhost.exe",
+    "taskhostw.exe",
+    "sihost.exe",
+}
+
 PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\microsoft\\edge\\", ("msedge.exe",)),
     ("\\google\\chrome\\", ("chrome.exe",)),
@@ -180,16 +194,9 @@ PATH_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\cherrystudio\\", ("Cherry Studio.exe", "CherryStudio.exe")),
     ("\\ichat\\", ("iChat.exe", "ichat.exe")),
     ("\\onedrive\\", ("OneDrive.exe",)),
-    ("\\appdata\\local\\temp\\", ("360tray.exe", "360safe.exe", "360sd.exe", "360bpsvc.exe", "360rp.exe", "360msgcenter.exe", "360speedld.exe", "SoftMgr.exe", "Doubao.exe", "doubao.exe", "DoubaoLauncher.exe", "virtual_camera.exe")),
     ("\\local\\temp\\360gameinst_", ("360tray.exe", "360safe.exe", "360sd.exe", "360bpsvc.exe", "360rp.exe", "360msgcenter.exe", "360speedld.exe", "SoftMgr.exe")),
     ("\\local\\temp\\doubao_ext\\", ("Doubao.exe", "doubao.exe", "DoubaoLauncher.exe")),
     ("\\local\\temp\\virtual_camera\\", ("virtual_camera.exe", "WeChat.exe", "WeChatAppEx.exe")),
-    ("\\windows\\temp\\", ("virtual_camera.exe",)),
-    ("\\microsoft\\windows\\webcache\\", ("dllhost.exe", "taskhostw.exe", "RuntimeBroker.exe")),
-    ("\\microsoft\\windows\\explorer\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
-    ("\\microsoft\\windows\\caches\\", ("explorer.exe", "StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
-    ("\\microsoft.windows.startmenuexperiencehost_", ("StartMenuExperienceHost.exe", "ShellExperienceHost.exe", "SearchHost.exe", "RuntimeBroker.exe")),
-    ("\\microsoft\\search\\data\\applications\\windows\\gatherlogs\\", ("SearchIndexer.exe", "SearchProtocolHost.exe", "SearchFilterHost.exe")),
 )
 
 SERVICE_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -200,10 +207,6 @@ SERVICE_PROCESS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("\\fontcache\\", ("FontCache", "FontCache3.0.0.0")),
     ("\\microsoft\\search\\data\\applications\\windows\\gatherlogs\\", ("WSearch",)),
 )
-
-RESTART_AFTER_KILL = {
-    "explorer.exe",
-}
 
 RESTART_AFTER_SERVICE_STOP = {
     "fontcache",
@@ -1353,14 +1356,23 @@ def restart_services(service_names: Iterable[str], log: Callable[[str], None]) -
             log(f"启动服务失败 {name}: {exc}")
 
 
+def is_never_kill_process(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered in NEVER_KILL_PROCESS_NAMES
+        or lowered.startswith("appdatacleaner")
+        or lowered.startswith("codex")
+    )
+
+
 def kill_processes(process_names: Iterable[str], log: Callable[[str], None]) -> set[str]:
     killed: set[str] = set()
-    for name in sorted({p for p in process_names if p and p.lower() not in CODEX_PROCESS_NAMES and not p.lower().startswith("appdatacleaner")}):
+    for name in sorted({p for p in process_names if p and not is_never_kill_process(p)}):
         if not name:
             continue
         try:
             completed = subprocess.run(
-                ["taskkill", "/F", "/IM", name, "/T"],
+                ["taskkill", "/F", "/IM", name],
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -1374,16 +1386,6 @@ def kill_processes(process_names: Iterable[str], log: Callable[[str], None]) -> 
         except Exception as exc:
             log(f"结束进程失败 {name}: {exc}")
     return killed
-
-
-def restart_processes(process_names: Iterable[str], log: Callable[[str], None]) -> None:
-    for name in sorted({p.lower() for p in process_names} & RESTART_AFTER_KILL):
-        if name == "explorer.exe":
-            try:
-                subprocess.Popen(["explorer.exe"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                log("已重新启动资源管理器 explorer.exe")
-            except Exception as exc:
-                log(f"重启资源管理器失败: {exc}")
 
 
 def infer_processes_for_target(target: Target) -> tuple[str, ...]:
@@ -1505,7 +1507,7 @@ class CleanerApp:
         options_frame.pack(side=tk.TOP, fill=tk.X)
         ttk.Checkbutton(
             options_frame,
-            text="清理前强制关闭相关软件（不关闭 Codex）",
+            text="清理前强制关闭相关软件（不关闭 Codex/本软件/Explorer）",
             variable=self.force_close_var,
         ).pack(side=tk.LEFT)
 
@@ -1794,10 +1796,15 @@ class CleanerApp:
         if admin_count:
             message += f"\n其中 {admin_count} 项需要管理员权限。"
         if self.force_close_var.get():
-            process_count = len({p.lower() for target in selected for p in infer_processes_for_target(target)})
+            process_count = len({
+                p.lower()
+                for target in selected
+                for p in infer_processes_for_target(target)
+                if not is_never_kill_process(p)
+            })
             service_count = len({s.lower() for target in selected for s in infer_services_for_target(target)})
             if process_count or service_count:
-                message += f"\n已勾选强制关闭：清理前会尝试结束 {process_count} 类进程、停止 {service_count} 类服务，不会关闭 Codex。"
+                message += f"\n已勾选强制关闭：清理前会尝试结束 {process_count} 类软件进程、停止 {service_count} 类服务；不会关闭 Codex、本软件或 Explorer。"
         message += "\n\n会继续保护 Cookies、Login Data、Local Storage、IndexedDB 等登录相关数据。确认开始？"
         if not messagebox.askyesno(APP_NAME, message):
             return
@@ -1823,7 +1830,7 @@ class CleanerApp:
             stopped_services: set[str] = set()
             if force_close and (process_names or service_names):
                 self.worker_queue.put(("progress", {"value": 0, "maximum": len(selected), "text": "正在结束相关软件..."}))
-                self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关后台进程/服务（跳过 Codex）。"))
+                self.worker_queue.put(("log", "已勾选强制关闭，清理前先结束相关软件进程/服务（跳过 Codex、本软件和 Explorer）。"))
                 stopped_services = stop_services(service_names, lambda msg: self.worker_queue.put(("log", msg)))
                 killed_processes = kill_processes(process_names, lambda msg: self.worker_queue.put(("log", msg)))
                 time.sleep(0.8)
@@ -1871,8 +1878,6 @@ class CleanerApp:
             self.worker_queue.put(("log", f"日志已写入: {log_path}"))
             if stopped_services:
                 restart_services(stopped_services, lambda msg: self.worker_queue.put(("log", msg)))
-            if killed_processes:
-                restart_processes(killed_processes, lambda msg: self.worker_queue.put(("log", msg)))
             self.worker_queue.put(("clean_done", {"total": len(selected), "success": success_count, "failed": failed_count}))
 
         threading.Thread(target=worker, daemon=True).start()

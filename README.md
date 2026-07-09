@@ -84,16 +84,18 @@ Extensions
 界面里有复选框：
 
 ```text
-清理前强制关闭相关软件（不关闭 Codex）
+清理前强制关闭相关软件（不关闭 Codex/本软件/Explorer）
 ```
 
 默认不勾选。勾选后，工具会根据已选清理项尝试结束相关软件进程，例如 Edge、Chrome、360 / 360 极速浏览器、WPS、千问、豆包、夸克、百度网盘、微信 / xwechat、企业微信、千牛 / 1688、QQ、QQ 音乐等。
 
-对 360 缓存、Windows 字体缓存、Windows Search GatherLogs 等顽固项，工具还会尝试停止匹配到的服务，例如 `360bpsvc`、`FontCache`、`WSearch`。如果清理系统缩略图、图标缓存等项目时临时结束了 `explorer.exe`，清理后会自动重新启动资源管理器。
+强制关闭只结束明确匹配到的软件进程，不使用进程树结束；并且永远跳过 Codex、清理器自身、`explorer.exe`、开始菜单、ShellExperienceHost、RuntimeBroker、Windows Search 进程等系统壳/宿主进程，避免桌面、当前会话或清理器被带走。
+
+对 360 缓存、Windows 字体缓存、Windows Search GatherLogs 等顽固项，工具还会尝试停止匹配到的服务，例如 `360bpsvc`、`FontCache`、`WSearch`；停止过的 `FontCache` / `WSearch` 会在清理结束后尝试启动回来。
 
 清理文件时会先解除只读/隐藏/系统属性，并对被占用或刚释放的缓存做短暂重试，减少 `WinError 5`、`WinError 32`、`WinError 145` 造成的残留。
 
-工具会跳过 Codex、自身进程、Codex 运行缓存和当前 EXE 的运行时解压目录，避免中断当前会话。
+工具会跳过 Codex、自身进程、Explorer、系统壳进程、Codex 运行缓存和当前 EXE 的运行时解压目录，避免中断当前会话。
 
 ## 注意事项
 
